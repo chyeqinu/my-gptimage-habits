@@ -1,0 +1,20 @@
+# 密钥与环境
+.env
+.env.*
+!.env.example
+config.json
+
+# Python
+__pycache__/
+*.pyc
+
+# 生成产物
+out/
+test-out/
+*.zip
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
