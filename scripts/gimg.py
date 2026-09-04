@@ -25,7 +25,11 @@ my-gptimage-habits — 用 gpt-image-2 直接出图（复刻个人创作习惯�
       prompt 写“背景设置为方便抠图的纯绿色背景”+ `--unkey`（出绿底图后本地抠键色，
       输出真透明 PNG；已带 alpha 的图自动跳过抠色）
   - 单请求 n>1 行为不稳定（中转站按账号随机分配，有时支持有时拒绝，用户实测）：
-    脚本被拒时最多 3 轮（每轮 3 次重试）再退化为串行 n=1，串行前等 20s 让网关恢复
+    文生图（JSON 体小）被拒时最多 3 轮（每轮 3 次重试）再退化为串行 n=1；
+    图生图（multipart 大文件）直接串行 n=1（该中转站 n>1 实测多次全被拒）
+  - 同一图片短时间反复上传可能触发中转站的临时上传限制（实测一次窗口约 1 小时，
+    自行恢复）：期间上传报 `multipart EOF`，脚本等 45s 重试一次，真被限制时稍后再发；
+    对参考图重编码（改字节）可在窗口期内绕开
   - 接口不支持 background: transparent 参数（HTTP 400，勿发）
   - --transparent = 兜底模式（平时不用）：prompt 追加 [背景指令] 块（绿 #00FF00 /
     主体含绿色则洋红 #FF00FF 纯色底）+ 本地键色抠除（纯标准库实现）。
@@ -464,13 +468,14 @@ def _unkey(width, height, rgba, key=None):
 # ---------------- 请求 ----------------
 
 def build_fields(prompt, size, quality, n):
+    # 字段顺序与生成平台 openaiCompatibleImageApi.ts 保持一致
     fields = {
         "model": DEFAULT_MODEL,
         "prompt": prompt,
         "size": size,
-        "quality": quality,
         "output_format": "png",
         "moderation": "auto",
+        "quality": quality,
     }
     if n > 1:
         fields["n"] = str(n)
@@ -542,9 +547,10 @@ def _do_request(url, key, data, content_type, timeout):
         except urllib.error.HTTPError as e:
             last = "HTTP %d: %s" % (e.code, e.read().decode("utf-8", "replace")[:400])
             if "multipart" in last and "EOF" in last:
-                # 中转站在批量 400 后对大文件上传有惩罚窗口（约 1~5 分钟），
-                # 短重试无效，等 45s 让惩罚过期
-                print("  网关大文件上传被截断（multipart EOF），等 45s 让惩罚窗口过期…")
+                # 中转站对短时间内反复上传同一图片会进入临时上传限制
+                # （实测窗口约 1 小时，自行恢复）；短间隔重试通常无效，
+                # 等 45s 再试一次是保底，真被限制时稍后再发即可
+                print("  网关拒绝本次上传（multipart EOF，中转站临时限制），等 45s 再试…")
                 time.sleep(45)
             else:
                 time.sleep(15 if e.code == 429 else min(2 ** attempt, 8))
@@ -571,9 +577,9 @@ def generate(prompt, image_paths, size, quality, n, transparent, base_url, key, 
     pngs = None
     if n_total > 1:
         if image_paths:
-            # 图生图（multipart 大文件）：实测多次 n>1 尝试会让网关后续大文件上传报
-            # “multipart: NextPart: EOF”，所以直接串行 n=1，不浪费大文件上传。
-            print("  n=%d：图生图直接串行 n=1（中转站 n>1 行为不稳，避免弄坏网关）" % n_total)
+            # 图生图（multipart 大文件）：该中转站 n>1 实测 12 次全被拒（账号池行为，
+            # 用户反馈偶尔可用但少见），直接串行 n=1，避免无谓的大文件重试。
+            print("  n=%d：图生图直接串行 n=1（中转站 n>1 行为不稳）" % n_total)
         else:
             # 文生图（JSON body 小）：先按单请求 n>1 尝试；中转站按账号随机分配，
             # n>1 是否支持可能因账号而异（用户实测：有时可以），被拒时多试几轮再串行。
