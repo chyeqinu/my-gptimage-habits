@@ -13,8 +13,9 @@
 | 模型 | `gpt-image-2`（100%），API 模式 `images` |
 | 语言 | 100% 中文提示词 |
 | 带参考图 | 203 / 272（75%）——你的工作以“改图/合成”为主，纯生成较少 |
-| 接口协议 | 已克隆平台源码（`analysis/playground-src`，github.com/CookSleep/gpt_image_playground）逐一核实：
-  端点/`@图N`→`[image N]` 转换/透明底实现/n>1 限制，见 `parameters.md` 第 2 节 |
+| 接口协议 | 平台源码核实（`analysis/playground-src`）+ **当前端点 `ai-pixel.online` 实测（2026-09-04）**：
+  端点/`@图N`→`[image N]`/n>1 限制见 `parameters.md` 第 2 节；**实测新发现：size 参数被忽略、
+  比例与透明底由提示词控制**（见第 2.1 节） |
 
 ## 规则文件
 
