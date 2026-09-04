@@ -12,28 +12,33 @@ my-gptimage-habits — 用 gpt-image-2 直接出图（复刻个人创作习惯�
   python gimg.py --show-config
   python gimg.py --set-key <你的key> [--set-base-url <url>]
 
-接口协议（与 gpt-image-playground 源码一致）：
-  - 无参考图：POST {base}/v1/images/generations，JSON 体
-  - 有参考图：POST {base}/v1/images/edits，multipart（image[] 字段，顺序=@图1/@图2…）
+接口协议（2026-09-04 在 https://ai-pixel.online 实测核实）：
+  - 端点：无参考图 POST {base}/v1/images/generations（JSON）；
+    有参考图 POST {base}/v1/images/edits（multipart，image[] 字段，顺序=@图1/@图2…）
   - prompt 中的 @图N（含零宽标记）自动转换为 [image N]
-  - 不发送 background 参数（gpt-image-2 不支持原生透明，实测 HTTP 400）
-  - --transparent 走“真透明底”流程（与平台一致）：
-      1) prompt 追加 [背景指令] 块（绿 #00FF00 / 主体含绿色则洋红 #FF00FF 纯色底）
-      2) 生成普通 PNG
-      3) 本地按平台同款算法抠除键色，输出真透明 PNG（纯标准库实现，无依赖）
-  - 绿幕抠图（你的常用习惯）不加参数：prompt 里写“背景设置为方便抠图的纯绿色背景”，
-    交付绿底 PNG 给剪辑软件做色度键。
+  - 【重要】该中转站忽略 size 参数（实测发 720x1280 仍返回 1672x941）：
+    比例靠 prompt 写“（16：9）/（9：16）”等，--size 传 auto 即可（传了也无害）
+  - 【重要】透明底靠 prompt 写“透明底”：中转站直接返回带 alpha 的真透明 PNG
+    （实测 73% 像素全透明、无色残留），不需要 background 参数，也不勾选平台“透明底”选项
+  - 接口不支持 background: transparent 参数（HTTP 400，勿发）
+  - 接口不支持单请求 n>1（“not supported for OAuth image accounts”），脚本自动退化为串行 n=1
+  - --transparent = 兜底模式（平时不用）：prompt 追加 [背景指令] 块（绿 #00FF00 /
+    主体含绿色则洋红 #FF00FF 纯色底）+ 本地键色抠除（纯标准库实现）。
+    仅在“透明底”没生效、返回图无 alpha 时使用
+  - 出图后若 prompt 含“透明底/透明背景”但结果无 alpha 通道，脚本会明确警告
+  - 绿幕抠图（你的常用习惯）不加参数：prompt 写“背景设置为方便抠图的纯绿色背景”，
+    交付绿底 PNG 给剪辑软件做色度键
 
 参数约定（来自个人习惯规则，详见 references/parameters.md）：
   - model 固定 gpt-image-2；output_format 固定 png；moderation 固定 auto
-  - size 默认 auto；quality 默认 auto
-  - n 默认 1；探索设计用 2（单请求内 n>1，失败自动退化为串行 n=1）
+  - size 默认 auto（比例写进 prompt）；quality 默认 auto
+  - n 默认 1；探索设计用 2（接口不支持单请求 n>1，脚本自动串行）
   - 一次只发一个请求（账号有并发上限）
 
 key 读取优先级：环境变量 GPTIMAGE_API_KEY
             > ~/.gptimage/config.json（本技能）
             > ~/.gptimage-ppt/config.json（与 gptimage-ppt 共享）
-base_url 优先级：环境变量 GPTIMAGE_BASE_URL > 配置 > https://speed.ai-pixel.online
+base_url 优先级：环境变量 GPTIMAGE_BASE_URL > 配置 > https://ai-pixel.online
 本脚本不内置任何 key，避免泄露。
 """
 
@@ -52,7 +57,7 @@ import urllib.request
 import uuid
 import zlib
 
-DEFAULT_BASE_URL = "https://speed.ai-pixel.online"
+DEFAULT_BASE_URL = "https://ai-pixel.online"
 DEFAULT_MODEL = "gpt-image-2"
 CONFIG_PATHS = [
     os.path.expanduser(os.path.join("~", ".gptimage", "config.json")),
@@ -229,6 +234,31 @@ def _png_encode(width, height, rgba):
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
             + chunk(b"IDAT", zlib.compress(raw.getvalue(), 9))
             + chunk(b"IEND", b""))
+
+
+def _png_has_alpha(raw):
+    """仅读 IHDR 判断 PNG 是否带 alpha 通道（colortype 4/6 或 3+tRNS）。"""
+    if raw[:8] != b"\x89PNG\r\n\x1a\n":
+        return False
+    pos = 8
+    colortype = None
+    has_trns = False
+    while pos < len(raw):
+        (length,) = struct.unpack(">I", raw[pos:pos + 4])
+        ctype = raw[pos + 4:pos + 8]
+        data = raw[pos + 8:pos + 8 + length]
+        pos += 12 + length
+        if ctype == b"IHDR":
+            colortype = data[9]
+        elif ctype == b"tRNS":
+            has_trns = True
+        elif ctype == b"IEND":
+            break
+    if colortype in (4, 6):
+        return True
+    if colortype == 3 and has_trns:
+        return True
+    return False
 
 
 # ---------------- 键色抠除（与平台 transparentImage.ts 同算法） ----------------
@@ -602,11 +632,14 @@ def main(argv):
     ap = argparse.ArgumentParser(description="gpt-image-2 出图（个人习惯默认参数）")
     ap.add_argument("--prompt", default=None, help="提示词（中文，按 rules 模板写；@图N 自动转 [image N]）")
     ap.add_argument("--images", nargs="*", default=[], help="参考图本地路径，顺序= @图1/@图2…（最多16张）")
-    ap.add_argument("--size", default="auto", help="auto（默认，跟随输入图）| 720x1280 | 1280x720 | 1920x816 | 2160x1440 | 1024x1024")
+    ap.add_argument("--size", default="auto",
+                    help="auto（默认）| 720x1280 | 1280x720 等。注意：当前中转站忽略此参数，"
+                         "比例请写进 prompt（如“（16：9）/（9：16）”）")
     ap.add_argument("--quality", default="auto", help="auto（默认）| medium | high")
     ap.add_argument("--n", type=int, default=1, help="一次出几张：定稿1（默认），探索2")
     ap.add_argument("--transparent", action="store_true",
-                    help="真透明底：追加[背景指令]+本地键色抠除，输出带 alpha 的 PNG；"
+                    help="透明底兜底模式（平时不用）：中转站一般按 prompt 里的“透明底”直接返回透明 PNG；"
+                         "仅当返回图无 alpha 时用它（追加[背景指令]+本地键色抠除）。"
                          "绿幕抠图不用它，prompt 写“方便抠图的纯绿色背景”即可")
     ap.add_argument("--timeout", type=int, default=1000, help="请求超时秒数（默认1000）")
     ap.add_argument("--out-dir", default=".", help="输出目录（默认当前目录）")
@@ -672,6 +705,7 @@ def main(argv):
         print("  参考图: " + ", ".join(a.images))
 
     pngs, _ = generate(a.prompt, a.images, a.size, a.quality, a.n, a.transparent, base_url, key, a.timeout)
+    want_transparent = a.transparent or bool(re.search(r"透明底|透明背景|transparent", a.prompt))
     for i, b in enumerate(pngs):
         suffix = "-%02d" % (i + 1) if len(pngs) > 1 else ""
         path = os.path.join(a.out_dir, "%s%s.png" % (label, suffix))
@@ -682,6 +716,9 @@ def main(argv):
             print("  -> %s (%dx%d)" % (path, w, h))
         except ValueError:
             print("  -> %s" % path)
+        if want_transparent and not _png_has_alpha(b):
+            print("  ⚠ 警告：prompt 要求透明底，但返回图无 alpha 通道（中转站本次未处理透明指令）。"
+                  "可重试，或加 --transparent 走 [背景指令]+本地抠键色 兜底。")
     return 0
 
 

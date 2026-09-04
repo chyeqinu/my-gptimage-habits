@@ -5,7 +5,8 @@
 都能直接调用生图 API，按你的习惯出图并迭代。
 
 由 272 条真实历史任务（视频封面 / 字幕条 / 绿幕抠图 / 多图合成 / 改字 / PPT 封面 /
-分镜图）提炼，接口协议对照 gpt-image-playground 平台源码逐一核实。
+分镜图）提炼，接口协议对照平台源码核实 + 当前端点实测（2026-09-04：比例与透明底
+由提示词控制，size 参数被中转站忽略）。
 
 ## 支持的工作流
 
@@ -13,7 +14,7 @@
 |---|---|
 | W1 视频封面加字 | 背景图 + 主/副标题，16:9 / 9:16 |
 | W2 字幕条 / 人名条批量 | 首版探索 n=2，定稿后批量“字改成 X，保留板式” |
-| W3 元素提取 / 绿幕 / 透明底 | 绿幕（剪辑软件色度键）或真透明底（自动 [背景指令]+本地抠键色） |
+| W3 元素提取 / 绿幕 / 透明底 | 绿幕（剪辑软件色度键）或透明底（prompt 写“透明底”，端点直接返回透明 PNG） |
 | W4 多图合成 | 人物并图、水平面/身高匹配/脸部细节 |
 | W5 就地改字 | 最小改动 + 保护句“其他不变” |
 | W6 单张 PPT 封面 | 结构化 prompt（主题/内容/素材/风格要点） |
@@ -46,7 +47,7 @@ git clone <本仓库地址> ~/.agents/skills/my-gptimage-habits
 
 ```sh
 # 1) 非交互（推荐）
-python scripts/gimg.py --set-key <你的key> [--set-base-url https://speed.ai-pixel.online]
+python scripts/gimg.py --set-key <你的key> [--set-base-url https://ai-pixel.online]
 
 # 2) 交互式
 python scripts/gimg.py --configure
@@ -70,9 +71,14 @@ key 只保存在 `~/.gptimage/config.json`（600 权限）或环境变量里，*
 也可以直接跑脚本（Agent 内部就是这么调的）：
 
 ```sh
+# 比例写在 prompt 里（当前端点 size 参数不生效）；要透明就写“透明底”
 python scripts/gimg.py --prompt "把以下文字加到画面中作为我的视频封面（9：16）↵主标题↵副标题↵要有高级感设计感" \
-  --images 背景图.jpg --size 720x1280 --n 2 --out-dir out --name cover
+  --images 背景图.jpg --n 2 --out-dir out --name cover
 ```
+
+**两条实测铁律（2026-09-04 @ ai-pixel.online）：**
+1. **比例写进 prompt**（“（16：9）”“（9：16）”）——中转站忽略 size 参数；
+2. **透明底 = prompt 写“透明底”**——端点直接返回带 alpha 的透明 PNG（脚本会自动校验，无 alpha 会警告，届时加 `--transparent` 兜底）。
 
 ## 目录结构
 
