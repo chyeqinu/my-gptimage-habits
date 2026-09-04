@@ -18,13 +18,18 @@ my-gptimage-habits — 用 gpt-image-2 直接出图（复刻个人创作习惯�
   - prompt 中的 @图N（含零宽标记）自动转换为 [image N]
   - 【重要】该中转站忽略 size 参数（实测发 720x1280 仍返回 1672x941）：
     比例靠 prompt 写“（16：9）/（9：16）”等，--size 传 auto 即可（传了也无害）
-  - 【重要】透明底靠 prompt 写“透明底”：中转站直接返回带 alpha 的真透明 PNG
-    （实测 73% 像素全透明、无色残留），不需要 background 参数，也不勾选平台“透明底”选项
+  - 【重要】透明底规则（2026-09-04 用户实测 + 本脚本验证）：
+    * 文生图（无参考图）：prompt 写“透明底”→ 直接返回带 alpha 的真透明 PNG，
+      且排版设计质量比绿底版更好 —— 这是首选
+    * 图生图（有参考图）：prompt 写“透明底”**不生效** → 改用绿底链路：
+      prompt 写“背景设置为方便抠图的纯绿色背景”+ `--unkey`（出绿底图后本地抠键色，
+      输出真透明 PNG；已带 alpha 的图自动跳过抠色）
+  - 单请求 n>1 行为不稳定（中转站按账号随机分配，有时支持有时拒绝，用户实测）：
+    脚本被拒时最多 3 轮（每轮 3 次重试）再退化为串行 n=1，串行前等 20s 让网关恢复
   - 接口不支持 background: transparent 参数（HTTP 400，勿发）
-  - 接口不支持单请求 n>1（“not supported for OAuth image accounts”），脚本自动退化为串行 n=1
   - --transparent = 兜底模式（平时不用）：prompt 追加 [背景指令] 块（绿 #00FF00 /
     主体含绿色则洋红 #FF00FF 纯色底）+ 本地键色抠除（纯标准库实现）。
-    仅在“透明底”没生效、返回图无 alpha 时使用
+    仅在文生图“透明底”没生效、返回图无 alpha 时使用
   - 出图后若 prompt 含“透明底/透明背景”但结果无 alpha 通道，脚本会明确警告
   - 绿幕抠图（你的常用习惯）不加参数：prompt 写“背景设置为方便抠图的纯绿色背景”，
     交付绿底 PNG 给剪辑软件做色度键
@@ -536,14 +541,20 @@ def _do_request(url, key, data, content_type, timeout):
             return _extract_images(body), body
         except urllib.error.HTTPError as e:
             last = "HTTP %d: %s" % (e.code, e.read().decode("utf-8", "replace")[:400])
-            time.sleep(15 if e.code == 429 else min(2 ** attempt, 8))
+            if "multipart" in last and "EOF" in last:
+                # 中转站在批量 400 后对大文件上传有惩罚窗口（约 1~5 分钟），
+                # 短重试无效，等 45s 让惩罚过期
+                print("  网关大文件上传被截断（multipart EOF），等 45s 让惩罚窗口过期…")
+                time.sleep(45)
+            else:
+                time.sleep(15 if e.code == 429 else min(2 ** attempt, 8))
         except Exception as e:  # noqa: BLE001
             last = repr(e)
             time.sleep(min(2 ** attempt, 8))
     raise RuntimeError("生成失败（已重试 3 次）：" + last)
 
 
-def generate(prompt, image_paths, size, quality, n, transparent, base_url, key, timeout):
+def generate(prompt, image_paths, size, quality, n, transparent, base_url, key, timeout, unkey=False):
     api_prompt = convert_mentions(prompt)
     if transparent:
         api_prompt = build_transparent_prompt(api_prompt)
@@ -559,30 +570,52 @@ def generate(prompt, image_paths, size, quality, n, transparent, base_url, key, 
 
     pngs = None
     if n_total > 1:
-        # 先按单请求 n>1 尝试；若接口不支持，退化为串行 n=1
-        try:
-            pngs, _ = _do_request(url, key, data, ct, timeout)
-        except RuntimeError as e:
-            if "HTTP 4" not in str(e):
-                raise
-            print("  n=%d 单请求被拒（%s），退化为串行 n=1" % (n_total, str(e)[:120]))
+        if image_paths:
+            # 图生图（multipart 大文件）：实测多次 n>1 尝试会让网关后续大文件上传报
+            # “multipart: NextPart: EOF”，所以直接串行 n=1，不浪费大文件上传。
+            print("  n=%d：图生图直接串行 n=1（中转站 n>1 行为不稳，避免弄坏网关）" % n_total)
+        else:
+            # 文生图（JSON body 小）：先按单请求 n>1 尝试；中转站按账号随机分配，
+            # n>1 是否支持可能因账号而异（用户实测：有时可以），被拒时多试几轮再串行。
+            for round_ in range(3):
+                try:
+                    pngs, _ = _do_request(url, key, data, ct, timeout)
+                    break
+                except RuntimeError as e:
+                    if "HTTP 4" not in str(e):
+                        raise
+                    if round_ < 2:
+                        print("  n=%d 单请求被拒（%s），10s 后第 %d 轮重试（中转站可能换账号）…"
+                              % (n_total, str(e)[:100], round_ + 2))
+                        time.sleep(10)
+                    else:
+                        print("  n=%d 单请求 3 轮仍被拒，退化为串行 n=1" % n_total)
+        if pngs is None:
             pngs = []
             single = dict(fields)
             single.pop("n", None)
             if not image_paths:
                 sdata = json.dumps(build_json_body(single)).encode("utf-8")
             else:
-                sdata, _ = build_multipart(single, image_paths)
+                sdata = None
             for i in range(n_total):
                 print("  串行第 %d/%d 张…" % (i + 1, n_total))
+                if image_paths:
+                    # 每次重建 multipart（新 boundary），规避网关在连续大文件上传后的残留状态
+                    sdata, _ = build_multipart(single, image_paths)
                 one, _ = _do_request(url, key, sdata, ct, timeout)
                 pngs.extend(one)
     else:
         pngs, _ = _do_request(url, key, data, ct, timeout)
 
-    if transparent:
+    if transparent or unkey:
         fixed = []
         for i, raw in enumerate(pngs):
+            if _png_has_alpha(raw):
+                # 已是真透明（文生图“透明底”直出），无需再抠
+                print("  第%d张已带 alpha 通道，跳过抠键色" % (i + 1))
+                fixed.append(raw)
+                continue
             try:
                 w, h, rgba = _png_decode(raw)
                 rgba2, used = _unkey(w, h, rgba)
@@ -641,6 +674,10 @@ def main(argv):
                     help="透明底兜底模式（平时不用）：中转站一般按 prompt 里的“透明底”直接返回透明 PNG；"
                          "仅当返回图无 alpha 时用它（追加[背景指令]+本地键色抠除）。"
                          "绿幕抠图不用它，prompt 写“方便抠图的纯绿色背景”即可")
+    ap.add_argument("--unkey", action="store_true",
+                    help="出绿底图后本地抠键色，输出带 alpha 的透明 PNG（不改 prompt）。"
+                         "图生图（带参考图）要透明底时用：prompt 写“方便抠图的纯绿色背景”+ 本选项；"
+                         "文生图不要用它（prompt 直接写“透明底”即可，且质量更好）")
     ap.add_argument("--timeout", type=int, default=1000, help="请求超时秒数（默认1000）")
     ap.add_argument("--out-dir", default=".", help="输出目录（默认当前目录）")
     ap.add_argument("--name", default=None, help="输出文件名前缀（默认取提示词前几个字）")
@@ -704,7 +741,7 @@ def main(argv):
     if a.images:
         print("  参考图: " + ", ".join(a.images))
 
-    pngs, _ = generate(a.prompt, a.images, a.size, a.quality, a.n, a.transparent, base_url, key, a.timeout)
+    pngs, _ = generate(a.prompt, a.images, a.size, a.quality, a.n, a.transparent, base_url, key, a.timeout, unkey=a.unkey)
     want_transparent = a.transparent or bool(re.search(r"透明底|透明背景|transparent", a.prompt))
     for i, b in enumerate(pngs):
         suffix = "-%02d" % (i + 1) if len(pngs) > 1 else ""

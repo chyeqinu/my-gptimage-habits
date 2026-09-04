@@ -47,10 +47,12 @@
 | 错误 | 原因 | 处理 |
 |---|---|---|
 | `Concurrency limit exceeded for account` | 账号并发超限（你的样本里 3 次） | **串行**：等上一个完成再发下一个；出 2 张让技能脚本串行完成，不开多任务 |
-| `n greater than 1 is not supported` | 接口不支持单请求 n>1 | 技能脚本自动退化为串行 n=1；手动调用时改为分开发 |
-| `background transparent is not supported by gpt-image-2` | 接口拒绝 background 参数 | 不传 background 参数；**透明底靠 prompt 写“透明底”**（当前端点直接返回透明 PNG） |
+| `n greater than 1 is not supported` | 中转站按账号随机分配，n>1 时而被拒（用户实测有时可以） | 文生图：脚本自动多试 2 轮再退串行；图生图：脚本直接串行 n=1（不试 n>1） |
+| `background transparent is not supported by gpt-image-2` | 接口拒绝 background 参数 | 不传 background 参数；透明底见下行规则 |
+| 图生图（带参考图）prompt 写“透明底”没生效 | **透明底只在文生图生效**（用户实测） | 图生图要透明：prompt 改“背景设置为方便抠图的纯绿色背景”+ 技能 `--unkey`（本地抠键色出透明 PNG） |
 | 出图比例不对（size 参数被忽略） | 当前中转站忽略 size 参数（实测） | 比例写进 prompt：“（16：9）”“（9：16）”“比例21:9” |
-| prompt 写了“透明底”但返回图无 alpha | 中转站偶发未按透明处理 | 脚本会自动警告；先重试，仍不行加 `--transparent`（[背景指令]+本地抠键色兜底） |
+| prompt 写了“透明底”（文生图）但返回图无 alpha | 中转站偶发未按透明处理 | 脚本会自动警告；先重试，仍不行加 `--transparent`（[背景指令]+本地抠键色兜底） |
+| `read multipart body: multipart: NextPart: EOF` | 两类原因（2026-09-04 实测）：① 批量 400 后网关对大文件上传的临时惩罚窗口（约 1~5 分钟）；② **同一参考图短时间反复上传会被按感知指纹标记，之后该图（任何尺寸/编码）的上传都被静默截断**——随机图和小图正常、同图缩小版全挂、加裁剪/旋转/噪声重编码后立即恢复 | 脚本自动等 45s 重试（对①有效）；若②：对参考图做轻度重编码（裁 2%、旋转 0.5°、加噪、换压缩质量）换掉指纹再传；批量复用同一底图时注意控制上传次数 |
 | `请求超时：超过 1000 秒仍未完成` | 复杂任务太慢（多图/长 prompt） | 提高 timeout 到 1000s；仍超就拆需求、减少参考图数量或重试 |
 | 接口 401 / 鉴权失败 | API key 失效 | 重新 `--set-key`（见 SKILL.md 第 0 步） |
 | 响应无 `b64_json` | 接口异常/限流 | 脚本会同时识别 `url` 字段并下载；仍失败则检查网络或换备用 base_url |

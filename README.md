@@ -71,14 +71,23 @@ key 只保存在 `~/.gptimage/config.json`（600 权限）或环境变量里，*
 也可以直接跑脚本（Agent 内部就是这么调的）：
 
 ```sh
-# 比例写在 prompt 里（当前端点 size 参数不生效）；要透明就写“透明底”
-python scripts/gimg.py --prompt "把以下文字加到画面中作为我的视频封面（9：16）↵主标题↵副标题↵要有高级感设计感" \
+# 比例写在 prompt 里（当前端点 size 参数不生效）
+python scripts/gimg.py --prompt "把以下文字加到画面中作为我的视频封面（9：16）↵主标题副标题↵要有高级感设计感" \
   --images 背景图.jpg --n 2 --out-dir out --name cover
+
+# 图生图要透明底（“透明底”只在文生图生效）：绿底 prompt + --unkey 本地抠键色
+python scripts/gimg.py --prompt "将字幕条完整的提取出来，背景设置为方便抠图的纯绿色背景" \
+  --images 参考图.jpg --unkey --out-dir out --name bar
 ```
 
-**两条实测铁律（2026-09-04 @ ai-pixel.online）：**
+**实测铁律（2026-09-04 @ ai-pixel.online）：**
 1. **比例写进 prompt**（“（16：9）”“（9：16）”）——中转站忽略 size 参数；
-2. **透明底 = prompt 写“透明底”**——端点直接返回带 alpha 的透明 PNG（脚本会自动校验，无 alpha 会警告，届时加 `--transparent` 兜底）。
+2. **透明底分文生图 / 图生图**：
+   - 文生图（无参考图）：prompt 写“透明底”→ 直接返回带 alpha 的透明 PNG，质量比绿底版好；
+   - 图生图（有参考图）：“透明底”不生效 → 绿底 prompt + `--unkey`（本地抠键色出透明 PNG）；
+3. **n>1 行为不稳**（中转站账号随机分配，有时可以）：文生图脚本先试 3 轮再串行，图生图直接串行 n=1；
+4. **大文件上传**：批量 400 后网关有约 1~5 分钟惩罚窗口（`multipart EOF`），脚本自动等 45s 重试；
+   参考图建议长边 ≤2048px，失败时可继续缩小（~300KB 以内很稳）。
 
 ## 目录结构
 
